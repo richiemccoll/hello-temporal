@@ -1,0 +1,127 @@
+# Envoy runs two listeners:
+#   ingress :9080  clients -> api (Connect / gRPC / gRPC-Web), upstream over h2c
+#   egress  :10000 worker  -> api.thecatapi.com, upstream over TLS
+# The admin interface (:9901) exposes stats, clusters and config_dump.
+admin:
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }
+
+static_resources:
+  listeners:
+    - name: ingress
+      address:
+        socket_address: { address: 127.0.0.1, port_value: 9080 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: ingress
+                codec_type: AUTO # HTTP/1.1 (curl, Connect JSON) and h2c (grpcurl, gRPC)
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        text_format_source:
+                          inline_string: "[ingress] %START_TIME% \"%REQ(:METHOD)% %REQ(:PATH)% %PROTOCOL%\" status=%RESPONSE_CODE% grpc=%GRPC_STATUS% dur=%DURATION%ms upstream=%UPSTREAM_HOST% req_id=%REQ(X-REQUEST-ID)%\n"
+                route_config:
+                  name: ingress
+                  virtual_hosts:
+                    - name: api
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route:
+                            cluster: api
+                            timeout: 35s # a little above the API's 30s workflow timeout
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+    - name: egress_thecatapi
+      address:
+        socket_address: { address: 127.0.0.1, port_value: 10000 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: egress_thecatapi
+                access_log:
+                  - name: envoy.access_loggers.stdout
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                      log_format:
+                        text_format_source:
+                          inline_string: "[egress] %START_TIME% \"%REQ(:METHOD)% %REQ(:PATH)%\" status=%RESPONSE_CODE% dur=%DURATION%ms upstream=%UPSTREAM_HOST% retries=%UPSTREAM_REQUEST_ATTEMPT_COUNT%\n"
+                route_config:
+                  name: egress_thecatapi
+                  virtual_hosts:
+                    - name: thecatapi
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route:
+                            cluster: thecatapi
+                            host_rewrite_literal: api.thecatapi.com
+                            timeout: 5s
+                            # Fast, local retries for connection-level blips. Temporal's activity
+                            # retry policy remains the durable, long-horizon retry mechanism.
+                            retry_policy:
+                              retry_on: connect-failure,reset,gateway-error
+                              num_retries: 2
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    - name: api
+      type: STATIC
+      connect_timeout: 1s
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {} # gRPC needs HTTP/2; the Go API accepts h2c
+      health_checks:
+        - timeout: 1s
+          interval: 5s
+          unhealthy_interval: 1s # recover quickly when the API starts after Envoy
+          no_traffic_interval: 5s # default is 60s, which hides a healthy API at startup
+          unhealthy_threshold: 2
+          healthy_threshold: 1
+          grpc_health_check:
+            service_name: hello.v1.HelloService
+      load_assignment:
+        cluster_name: api
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 127.0.0.1, port_value: 8081 }
+
+    - name: thecatapi
+      type: LOGICAL_DNS
+      dns_lookup_family: V4_ONLY
+      connect_timeout: 2s
+      load_assignment:
+        cluster_name: thecatapi
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: api.thecatapi.com, port_value: 443 }
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+          sni: api.thecatapi.com
+          common_tls_context:
+            validation_context:
+              trusted_ca: { filename: /etc/ssl/cert.pem }
+              match_typed_subject_alt_names:
+                - san_type: DNS
+                  matcher: { exact: api.thecatapi.com }

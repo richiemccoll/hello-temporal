@@ -1,0 +1,15 @@
+# Local stack runtime: built binaries, logs, pid files (scripts/stack.sh)
+.run/
+
+# Go
+*.test
+*.out
+coverage.*
+
+# OS and editors
+.DS_Store
+.idea/
+.vscode/
+
+# Local secrets, such as a CAT_API_KEY
+.env

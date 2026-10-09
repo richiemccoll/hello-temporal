@@ -1,0 +1,42 @@
+syntax = "proto3";
+
+package hello.v1;
+
+import "buf/validate/validate.proto";
+
+// HelloService is the public edge API, exposed to clients through Envoy.
+service HelloService {
+  // SayHello greets the caller and attaches a random cat picture.
+  //
+  // The work is executed durably by a Temporal workflow: the API starts the
+  // workflow, a worker runs an activity that calls TheCatAPI, and the API
+  // waits for the workflow result before responding.
+  rpc SayHello(SayHelloRequest) returns (SayHelloResponse) {}
+}
+
+message SayHelloRequest {
+  // Name of the person to greet.
+  string name = 1 [(buf.validate.field).string = {
+    min_len: 1
+    max_len: 64
+  }];
+}
+
+message SayHelloResponse {
+  // Human readable greeting.
+  string greeting = 1;
+  // The cat fetched from TheCatAPI.
+  Cat cat = 2;
+  // Temporal workflow ID, useful for looking the execution up in the Temporal UI.
+  string workflow_id = 3;
+  // Temporal run ID of the execution.
+  string run_id = 4;
+}
+
+// Cat is a picture returned by TheCatAPI.
+message Cat {
+  string id = 1;
+  string url = 2;
+  int32 width = 3;
+  int32 height = 4;
+}

@@ -1,0 +1,19 @@
+# Code generation. Plugins run through `go tool` so their versions are pinned in go.mod
+# and nobody needs to install protoc or plugins globally.
+version: v2
+clean: true
+managed:
+  enabled: true
+  disable:
+    - file_option: go_package
+      module: buf.build/bufbuild/protovalidate
+  override:
+    - file_option: go_package_prefix
+      value: github.com/example/hello-temporal/gen
+plugins:
+  - local: ["go", "tool", "protoc-gen-go"]
+    out: gen
+    opt: paths=source_relative
+  - local: ["go", "tool", "protoc-gen-connect-go"]
+    out: gen
+    opt: paths=source_relative
